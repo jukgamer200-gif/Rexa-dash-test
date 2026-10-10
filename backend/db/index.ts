@@ -198,6 +198,11 @@ export const dbUsers = {
     const stmt = db.prepare('UPDATE users SET role = ?, updated_at = ? WHERE id = ?');
     stmt.run(role, new Date().toISOString(), id);
   },
+
+  updatePterodactylId(id: string, pterodactylId: number) {
+    const stmt = db.prepare('UPDATE users SET pterodactyl_id = ?, updated_at = ? WHERE id = ?');
+    stmt.run(pterodactylId, new Date().toISOString(), id);
+  },
 };
 
 export const dbGrants = {

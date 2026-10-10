@@ -40,7 +40,8 @@ async function startServer() {
     console.log(`=======================================================`);
     console.log(` RexaCloud Game Server Management Panel is running!`);
     console.log(` Port: ${PORT}`);
-    console.log(` Mode: ${config.isDemoMode ? 'DEMO MODE (Sandbox)' : 'PRODUCTION (Connected to Pterodactyl)'}`);
+    console.log(` Pterodactyl Status: ${config.isPterodactylConfigured ? `Configured (${config.pterodactylUrl})` : 'Not Configured (Set in Admin > Settings)'}`);
+    console.log(` Environment: ${config.nodeEnv}`);
     console.log(` API Base: http://localhost:${PORT}/api`);
     console.log(`=======================================================`);
   });

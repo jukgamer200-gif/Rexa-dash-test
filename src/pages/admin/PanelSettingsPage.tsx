@@ -30,21 +30,23 @@ export const PanelSettingsPage: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [testResult, setTestResult] = useState<SystemConnectionStatus | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     if (systemStatus) {
-      setPanelUrl(systemStatus.panelUrl || '');
+      setPanelUrl(systemStatus.panelUrl || systemStatus.pterodactylUrl || '');
     }
   }, [systemStatus]);
 
   const handleTestConnection = async () => {
     setIsTesting(true);
+    setActionError(null);
     try {
       const res = await api.testConnection();
       setTestResult(res.status);
       await refreshStatus();
-    } catch (err: any) {
-      alert(`Connection test error: ${err.message}`);
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Connection test failed');
     } finally {
       setIsTesting(false);
     }
@@ -54,6 +56,7 @@ export const PanelSettingsPage: React.FC = () => {
     e.preventDefault();
     setIsSaving(true);
     setSaveSuccess(false);
+    setActionError(null);
     try {
       const res = await api.updateSystemSettings({
         pterodactylUrl: panelUrl,
@@ -64,8 +67,8 @@ export const PanelSettingsPage: React.FC = () => {
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
       await refreshStatus();
-    } catch (err: any) {
-      alert(`Failed to save settings: ${err.message}`);
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Failed to save settings');
     } finally {
       setIsSaving(false);
     }
@@ -105,7 +108,7 @@ export const PanelSettingsPage: React.FC = () => {
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
                 {isConnected
-                  ? `Connected to ${currentStatus?.panelUrl || 'panel'}`
+                  ? `Connected to ${currentStatus?.panelUrl || currentStatus?.pterodactylUrl || 'panel'}`
                   : 'Enter your Pterodactyl Panel URL and API keys below to establish live communication.'}
               </p>
             </div>
@@ -214,6 +217,13 @@ export const PanelSettingsPage: React.FC = () => {
             Generated from Pterodactyl Admin &gt; Application API with read &amp; write permissions. Used for provisioning servers and managing nodes.
           </p>
         </div>
+
+        {actionError && (
+          <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+        )}
 
         <div className="flex items-center justify-between pt-2">
           {saveSuccess && (

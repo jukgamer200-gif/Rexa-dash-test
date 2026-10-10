@@ -26,24 +26,58 @@ fi
 INSTALL_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$INSTALL_DIR"
 
-echo -e "${CLR_CYAN}[1/5] Backing up configuration...${CLR_RESET}"
+echo -e "${CLR_CYAN}[1/5] Backing up configuration and database...${CLR_RESET}"
 BACKUP_TIME=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$INSTALL_DIR/backups"
 if [ -f .env ]; then
-    cp .env "$INSTALL_DIR/backups/.env.backup.$BACKUP_TIME"
-    echo -e "${CLR_GREEN}Saved backup to $INSTALL_DIR/backups/.env.backup.$BACKUP_TIME${CLR_RESET}"
+    cp -a .env "$INSTALL_DIR/backups/.env.backup.$BACKUP_TIME"
+    echo -e "${CLR_GREEN}Saved configuration backup to $INSTALL_DIR/backups/.env.backup.$BACKUP_TIME${CLR_RESET}"
+fi
+if [ -d database ]; then
+    mkdir -p "$INSTALL_DIR/backups/db_$BACKUP_TIME"
+    cp -a database/* "$INSTALL_DIR/backups/db_$BACKUP_TIME/" 2>/dev/null || true
+    echo -e "${CLR_GREEN}Saved database backup to $INSTALL_DIR/backups/db_$BACKUP_TIME/${CLR_RESET}"
 fi
 
 echo -e "${CLR_CYAN}[2/5] Updating repository source code...${CLR_RESET}"
 if [ -d .git ]; then
-    git fetch --all
-    git reset --hard origin/main || git pull
+    CURRENT_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
+    if [[ "$CURRENT_REMOTE" == *"rexacloud/panel"* || "$CURRENT_REMOTE" == *"Rexa-dash-test"* || -z "$CURRENT_REMOTE" ]]; then
+        echo "Updating Git remote origin to https://github.com/jukgamer200-gif/testdash.git..."
+        git remote set-url origin https://github.com/jukgamer200-gif/testdash.git 2>/dev/null || git remote add origin https://github.com/jukgamer200-gif/testdash.git
+    fi
+    git fetch origin main || git fetch --all
+
+    # Check for branch divergence
+    LOCAL_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
+    REMOTE_COMMIT=$(git rev-parse origin/main 2>/dev/null || echo "")
+    MERGE_BASE=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
+
+    if [ -n "$LOCAL_COMMIT" ] && [ -n "$REMOTE_COMMIT" ] && [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
+        if [ "$LOCAL_COMMIT" != "$MERGE_BASE" ] && [ "$REMOTE_COMMIT" != "$MERGE_BASE" ]; then
+            echo "Notice: Local branch and origin/main have diverged. Saving local changes to backup branch..."
+            git branch -f "backup-local-$BACKUP_TIME" 2>/dev/null || true
+            echo -e "${CLR_GREEN}Local branch preserved in backup-local-$BACKUP_TIME${CLR_RESET}"
+        fi
+    fi
+
+    # Reset working tree cleanly to latest remote release
+    git checkout -B main origin/main 2>/dev/null || git reset --hard origin/main
+
+    # Restore preserved user database and configuration
+    if [ -f "$INSTALL_DIR/backups/.env.backup.$BACKUP_TIME" ]; then
+        cp -a "$INSTALL_DIR/backups/.env.backup.$BACKUP_TIME" .env
+    fi
+    if [ -d "$INSTALL_DIR/backups/db_$BACKUP_TIME" ]; then
+        mkdir -p database
+        cp -a "$INSTALL_DIR/backups/db_$BACKUP_TIME"/* database/ 2>/dev/null || true
+    fi
 else
     echo "Notice: Non-git installation directory. Preserving current source files."
 fi
 
 echo -e "${CLR_CYAN}[3/5] Updating Node.js dependencies...${CLR_RESET}"
-npm install
+npm install || npm install --legacy-peer-deps
 
 echo -e "${CLR_CYAN}[4/5] Recompiling production frontend bundle...${CLR_RESET}"
 npm run build

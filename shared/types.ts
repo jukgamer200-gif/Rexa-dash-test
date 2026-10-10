@@ -136,6 +136,38 @@ export interface AdminNode {
   serversCount: number;
   maintenanceMode: boolean;
   status: 'online' | 'offline' | 'maintenance';
+  allocations?: {
+    id: number;
+    ip: string;
+    alias?: string | null;
+    port: number;
+    assigned: boolean;
+  }[];
+}
+
+export interface NodeReadiness {
+  configured: boolean;
+  node: {
+    id: number;
+    name: string;
+    fqdn: string;
+    scheme: string;
+    daemonListen: number;
+    memory: number;
+    disk: number;
+    maintenanceMode: boolean;
+  } | null;
+  wingsOnline: boolean;
+  totalAllocations: number;
+  availableAllocations: number;
+  allocations: {
+    id: number;
+    ip: string;
+    port: number;
+    assigned: boolean;
+  }[];
+  readinessStatus: 'READY' | 'NO_ALLOCATIONS' | 'MAINTENANCE' | 'OFFLINE' | 'UNCONFIGURED';
+  message: string;
 }
 
 export interface AdminLocation {
@@ -165,7 +197,7 @@ export interface AdminNest {
 
 export interface ActivityLog {
   id: string;
-  userId: string;
+  userId?: string;
   username: string;
   action: string;
   resource: string;
@@ -177,14 +209,15 @@ export interface ActivityLog {
 
 export interface SystemConnectionStatus {
   configured: boolean;
-  pterodactylUrl: string;
-  hasClientKey: boolean;
-  hasAppKey: boolean;
+  pterodactylUrl?: string;
+  panelUrl?: string;
+  hasClientKey?: boolean;
+  hasAppKey?: boolean;
   clientApiConnected: boolean;
   appApiConnected: boolean;
-  isDemoMode: boolean;
+  isDemoMode?: boolean;
   latencyMs: number;
-  lastChecked: string;
+  lastChecked?: string;
   errorMessage?: string;
 }
 
@@ -204,13 +237,15 @@ export interface CreateServerRequest {
     io: number;
     cpu: number;
   };
-  featureLimits: {
+  featureLimits?: {
     databases: number;
     allocations: number;
     backups: number;
   };
-  allocation: {
+  allocation?: {
     default: number;
-  };
+    additional?: number[];
+  } | number;
+  allocationId?: number;
   nodeId?: number;
 }

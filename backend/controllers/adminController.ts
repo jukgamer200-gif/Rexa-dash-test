@@ -109,20 +109,153 @@ export const adminController = {
     }
   },
 
+  async getNodeAllocations(req: AuthenticatedRequest, res: Response) {
+    try {
+      const nodeId = Number(req.params.id);
+      if (isNaN(nodeId)) {
+        return res.status(400).json({ error: 'Invalid node ID' });
+      }
+      const allocations = await pterodactylAdmin.getNodeAllocations(nodeId);
+      return res.json({ allocations });
+    } catch (err: any) {
+      return res.status(500).json({ error: 'Failed to list node allocations', message: err.message });
+    }
+  },
+
+  async getNodeReadiness(req: AuthenticatedRequest, res: Response) {
+    try {
+      const nodeId = Number(req.params.id);
+      if (isNaN(nodeId)) {
+        return res.status(400).json({ error: 'Invalid node ID' });
+      }
+      const readiness = await pterodactylAdmin.checkNodeReadiness(nodeId);
+      return res.json({ readiness });
+    } catch (err: any) {
+      return res.status(500).json({ error: 'Failed to inspect node readiness', message: err.message });
+    }
+  },
+
+  async createLocation(req: AuthenticatedRequest, res: Response) {
+    const { short, long } = req.body;
+    if (!short || !long) {
+      return res.status(400).json({ error: 'Short code and description are required for location.' });
+    }
+    try {
+      const location = await pterodactylAdmin.createLocation({ short: String(short).trim(), long: String(long).trim() });
+      return res.status(201).json({ success: true, location });
+    } catch (err: any) {
+      return res.status(500).json({ error: 'Failed to create location', message: err.message });
+    }
+  },
+
   async createServer(req: AuthenticatedRequest, res: Response) {
     try {
-      if (!pterodactylAdmin.isConfigured()) {
-        return res.status(503).json({ error: 'Pterodactyl Application API not configured' });
+      // 1. Strict Administrator Authorization Check
+      if (req.user?.role !== 'admin') {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'Strict administrator privileges required to provision game servers.',
+        });
       }
 
+      // 2. Integration configured check
+      if (!pterodactylAdmin.isConfigured()) {
+        return res.status(503).json({
+          error: 'Service Unavailable',
+          message: 'Pterodactyl Application API not configured. Please connect your panel in Admin Settings.',
+        });
+      }
+
+      const { name, limits, eggId, nestId, nodeId, allocationId, allocation, userId } = req.body;
+
+      // 3. Name Validation
+      if (!name || typeof name !== 'string' || name.trim().length === 0) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Server name is required and cannot be empty.',
+        });
+      }
+      if (name.trim().length > 191) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Server name cannot exceed 191 characters.',
+        });
+      }
+
+      // 4. Strict 32 GB RAM Limit Enforcement (Frontend & Backend validation)
+      const MAX_RAM_MB = 32768; // 32 GB = 32,768 MB
+      if (!limits || typeof limits !== 'object') {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Resource limits configuration is required.',
+        });
+      }
+
+      const memory = Number(limits.memory);
+      if (!Number.isInteger(memory) || memory <= 0) {
+        return res.status(400).json({
+          error: 'Invalid RAM Allocation',
+          message: 'Server RAM allocation must be a positive integer in MB (e.g. 1024, 2048, 4096).',
+        });
+      }
+
+      if (memory > MAX_RAM_MB) {
+        return res.status(400).json({
+          error: 'RAM Limit Exceeded',
+          message: `Maximum server RAM allocation is 32 GB (${MAX_RAM_MB} MB) per server. Requested: ${memory} MB.`,
+        });
+      }
+
+      // 5. CPU and Disk Validation
+      const cpu = Number(limits.cpu);
+      if (isNaN(cpu) || cpu < 0) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'CPU limit must be a positive number or 0.',
+        });
+      }
+
+      const disk = Number(limits.disk);
+      if (!Number.isInteger(disk) || disk <= 0) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Disk limit must be a positive integer in MB.',
+        });
+      }
+
+      // 6. Template validation
+      if (!eggId || isNaN(Number(eggId))) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'A valid Pterodactyl Egg template ID is required.',
+        });
+      }
+
+      const defaultAlloc = allocationId || (typeof allocation === 'object' ? allocation?.default : allocation);
+      if (!defaultAlloc || isNaN(Number(defaultAlloc))) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'An eligible node allocation port is required.',
+        });
+      }
+
+      // Dispatch to Pterodactyl Application API
       const result = await pterodactylAdmin.createServer(req.body);
+      const serverIdentifier = result.attributes?.identifier || result.identifier;
+
+      // If assigned to a specific RexaCloud user, grant access immediately
+      if (userId && serverIdentifier) {
+        try {
+          authService.grantServerAccess(String(userId), serverIdentifier);
+        } catch {}
+      }
 
       auditService.log({
         userId: req.user!.id,
         username: req.user!.username,
         action: 'SERVER_CREATE',
-        resource: req.body.name,
-        details: `Provisioned server ${req.body.name} via Application API`,
+        resource: name.trim(),
+        details: `Administrator provisioned server "${name.trim()}" (${memory} MB RAM, ${cpu}% CPU)`,
         status: 'success',
       });
 

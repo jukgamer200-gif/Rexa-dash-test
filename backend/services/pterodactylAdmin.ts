@@ -51,7 +51,7 @@ export const pterodactylAdmin = {
       return [];
     }
 
-    const data = await callPterodactylApp('/nodes');
+    const data = await callPterodactylApp('/nodes?include=allocations,location,servers');
     return (data.data || []).map((item: any) => {
       const a = item.attributes;
       return {
@@ -70,8 +70,124 @@ export const pterodactylAdmin = {
         serversCount: a.servers_count || 0,
         maintenanceMode: a.maintenance_mode,
         status: a.maintenance_mode ? 'maintenance' : 'online',
+        allocations: (a.relationships?.allocations?.data || []).map((alloc: any) => ({
+          id: alloc.attributes.id,
+          ip: alloc.attributes.ip,
+          alias: alloc.attributes.ip_alias,
+          port: alloc.attributes.port,
+          assigned: alloc.attributes.assigned ?? false,
+        })),
       };
     });
+  },
+
+  async getNodeAllocations(nodeId: number): Promise<any[]> {
+    if (!this.isConfigured()) {
+      return [];
+    }
+    const data = await callPterodactylApp(`/nodes/${nodeId}/allocations`);
+    return (data.data || []).map((item: any) => ({
+      id: item.attributes.id,
+      ip: item.attributes.ip,
+      alias: item.attributes.ip_alias,
+      port: item.attributes.port,
+      assigned: item.attributes.assigned ?? false,
+    }));
+  },
+
+  async createLocation(location: { short: string; long: string }): Promise<any> {
+    if (!this.isConfigured()) {
+      throw new Error('Pterodactyl Application API is not configured.');
+    }
+    return callPterodactylApp('/locations', 'POST', location);
+  },
+
+  async checkNodeReadiness(nodeId: number): Promise<any> {
+    if (!this.isConfigured()) {
+      return {
+        configured: false,
+        node: null,
+        wingsOnline: false,
+        totalAllocations: 0,
+        availableAllocations: 0,
+        allocations: [],
+        readinessStatus: 'UNCONFIGURED',
+        message: 'Pterodactyl Application API is not configured.',
+      };
+    }
+
+    try {
+      const nodeData = await callPterodactylApp(`/nodes/${nodeId}?include=allocations,servers`);
+      const attr = nodeData.attributes;
+      const rawAllocs = attr.relationships?.allocations?.data || [];
+      const allocations = rawAllocs.map((a: any) => ({
+        id: a.attributes.id,
+        ip: a.attributes.ip,
+        port: a.attributes.port,
+        assigned: a.attributes.assigned ?? false,
+      }));
+      const available = allocations.filter((a: any) => !a.assigned);
+
+      // Probe Wings daemon
+      let wingsOnline = false;
+      try {
+        const daemonUrl = `${attr.scheme}://${attr.fqdn}:${attr.daemon_listen}`;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2500);
+        const pingResp = await fetch(daemonUrl, { signal: controller.signal }).catch(() => null);
+        clearTimeout(timeout);
+        if (pingResp) {
+          wingsOnline = true;
+        }
+      } catch {
+        wingsOnline = false;
+      }
+
+      let readinessStatus: 'READY' | 'NO_ALLOCATIONS' | 'MAINTENANCE' | 'OFFLINE' | 'UNCONFIGURED' = 'READY';
+      let message = 'Node is online and ready for server provisioning.';
+
+      if (attr.maintenance_mode) {
+        readinessStatus = 'MAINTENANCE';
+        message = 'Node is currently in maintenance mode.';
+      } else if (allocations.length === 0 || available.length === 0) {
+        readinessStatus = 'NO_ALLOCATIONS';
+        message = 'Node has no available IP/port allocations. Add an allocation in Pterodactyl first.';
+      } else if (!wingsOnline) {
+        readinessStatus = 'OFFLINE';
+        message = `Wings daemon is not responding at ${attr.fqdn}:${attr.daemon_listen}. Check that the Wings daemon service is running.`;
+      }
+
+      return {
+        configured: true,
+        node: {
+          id: attr.id,
+          name: attr.name,
+          fqdn: attr.fqdn,
+          scheme: attr.scheme,
+          daemonListen: attr.daemon_listen,
+          memory: attr.memory,
+          disk: attr.disk,
+          maintenanceMode: attr.maintenance_mode,
+        },
+        wingsOnline,
+        totalAllocations: allocations.length,
+        availableAllocations: available.length,
+        allocations: available,
+        readinessStatus,
+        message,
+      };
+    } catch (err: any) {
+      return {
+        configured: true,
+        node: null,
+        wingsOnline: false,
+        totalAllocations: 0,
+        availableAllocations: 0,
+        allocations: [],
+        readinessStatus: 'OFFLINE',
+        message: 'Failed to inspect node: ' + err.message,
+      };
+    }
   },
 
   async getLocations(): Promise<AdminLocation[]> {
@@ -130,24 +246,41 @@ export const pterodactylAdmin = {
   },
 
   async createServer(payload: CreateServerRequest) {
+    // 1. Enforce strict 32 GB RAM limit (32768 MB)
+    const MAX_RAM_MB = 32768;
+    const memory = Number(payload.limits?.memory);
+    if (!Number.isInteger(memory) || memory <= 0) {
+      throw new Error('Memory limit must be a positive integer in MB.');
+    }
+    if (memory > MAX_RAM_MB) {
+      throw new Error(`Maximum server RAM allocation is 32 GB (${MAX_RAM_MB} MB). Requested: ${memory} MB.`);
+    }
+
     if (!this.isConfigured()) {
       throw new Error('Pterodactyl Application API is not configured.');
     }
 
+    // Resolve allocation ID
+    const defaultAlloc = payload.allocationId || (typeof payload.allocation === 'object' ? payload.allocation?.default : payload.allocation);
+    if (!defaultAlloc || isNaN(Number(defaultAlloc))) {
+      throw new Error('An eligible allocation ID is required to create a server.');
+    }
+
     // Call official Pterodactyl Application API /servers endpoint
     const body = {
-      name: payload.name,
-      user: payload.userId,
-      egg: payload.eggId,
+      name: payload.name.trim(),
+      description: payload.description || '',
+      user: Number(payload.userId) || 1,
+      egg: Number(payload.eggId),
       docker_image: payload.dockerImage || 'ghcr.io/pterodactyl/yolks:java_21',
       startup: payload.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}',
       environment: payload.environment || {},
       limits: {
-        memory: payload.limits.memory,
+        memory: memory,
         swap: payload.limits.swap || 0,
-        disk: payload.limits.disk,
+        disk: Number(payload.limits.disk) || 10240,
         io: payload.limits.io || 500,
-        cpu: payload.limits.cpu,
+        cpu: Number(payload.limits.cpu) || 100,
       },
       feature_limits: {
         databases: payload.featureLimits?.databases || 0,
@@ -155,7 +288,7 @@ export const pterodactylAdmin = {
         backups: payload.featureLimits?.backups || 0,
       },
       allocation: {
-        default: payload.allocationId,
+        default: Number(defaultAlloc),
       },
     };
 
@@ -214,6 +347,7 @@ export const pterodactylAdmin = {
         isDemoMode: false,
         latencyMs: 0,
         panelUrl: config.pterodactylUrl || '',
+        pterodactylUrl: config.pterodactylUrl || '',
         errorMessage: 'Pterodactyl Panel credentials not configured in settings or environment.',
       };
     }
@@ -270,6 +404,8 @@ export const pterodactylAdmin = {
       isDemoMode: false,
       latencyMs: latency,
       panelUrl: config.pterodactylUrl,
+      pterodactylUrl: config.pterodactylUrl,
+      lastChecked: new Date().toISOString(),
       errorMessage: errors.length > 0 ? errors.join('; ') : undefined,
     };
   },

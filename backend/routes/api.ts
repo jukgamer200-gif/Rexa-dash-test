@@ -43,7 +43,10 @@ api.get('/client/servers/:identifier/websocket', requireAuth, verifyServerAccess
 // ================= Administrator Application API =================
 api.get('/admin/overview', requireAuth, requireAdmin, adminController.getAdminOverview);
 api.get('/admin/nodes', requireAuth, requireAdmin, adminController.listNodes);
+api.get('/admin/nodes/:id/allocations', requireAuth, requireAdmin, adminController.getNodeAllocations);
+api.get('/admin/nodes/:id/readiness', requireAuth, requireAdmin, adminController.getNodeReadiness);
 api.get('/admin/locations', requireAuth, requireAdmin, adminController.listLocations);
+api.post('/admin/locations', requireAuth, requireAdmin, adminController.createLocation);
 api.get('/admin/nests', requireAuth, requireAdmin, adminController.listNests);
 api.post('/admin/servers', requireAuth, requireAdmin, adminController.createServer);
 api.post('/admin/servers/:id/suspend', requireAuth, requireAdmin, adminController.suspendServer);
