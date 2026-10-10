@@ -5,6 +5,7 @@
  */
 
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 import { dbSettings } from './db/index.js';
 
 dotenv.config();
@@ -42,7 +43,20 @@ export const config = {
 
   get jwtSecret(): string {
     const dbVal = dbSettings.get('JWT_SECRET');
-    return (dbVal || process.env.JWT_SECRET || 'rexacloud-production-secret-auth-key').trim();
+    if (dbVal && dbVal.trim()) {
+      return dbVal.trim();
+    }
+    if (process.env.JWT_SECRET && process.env.JWT_SECRET.trim()) {
+      return process.env.JWT_SECRET.trim();
+    }
+    // Generate secure random secret and persist it to prevent using static secrets
+    const generatedSecret = crypto.randomBytes(32).toString('hex');
+    try {
+      dbSettings.set('JWT_SECRET', generatedSecret);
+    } catch {
+      // In case DB is read-only or not initialized yet
+    }
+    return generatedSecret;
   },
 
   get nodeEnv(): string {
