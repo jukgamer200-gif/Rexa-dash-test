@@ -188,8 +188,9 @@ export const adminController = {
       }
 
       const { name, limits, eggId, nestId, nodeId, allocationId, allocation, userId } = req.body;
-      const envKeys = Object.keys(req.body.environment || {});
-      console.log(`[Admin Controller] createServer request: name="${name}", eggId=${eggId}, nestId=${nestId}, nodeId=${nodeId}, allocationId=${allocationId}, envKeys=[${envKeys.join(', ')}]`);
+      const rawEnv = req.body.environment || {};
+      const envSummary = Object.entries(rawEnv).map(([k, v]) => `${k}=${v ? '[SET]' : '[EMPTY]'}`).join(', ');
+      console.log(`[Admin Controller] createServer request: name="${name}", eggId=${eggId}, nestId=${nestId}, nodeId=${nodeId}, allocationId=${allocationId}, env=[${envSummary}]`);
 
       // 3. Name Validation
       if (!name || typeof name !== 'string' || name.trim().length === 0) {

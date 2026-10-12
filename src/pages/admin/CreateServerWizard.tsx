@@ -289,6 +289,22 @@ export const CreateServerWizard: React.FC = () => {
         }
       }
 
+      // Safe fallbacks for common startup variables if referenced by startup script
+      if (formData.startup.includes('SERVER_JARFILE') && (!envToSend['SERVER_JARFILE'] || envToSend['SERVER_JARFILE'].trim() === '')) {
+        envToSend['SERVER_JARFILE'] = 'server.jar';
+      }
+      if ((formData.startup.includes('BUILD_NUMBER') || formData.name.toLowerCase().includes('paper')) && (!envToSend['BUILD_NUMBER'] || envToSend['BUILD_NUMBER'].trim() === '')) {
+        envToSend['BUILD_NUMBER'] = 'latest';
+      }
+      if (formData.startup.includes('SERVER_VERSION') && (!envToSend['SERVER_VERSION'] || envToSend['SERVER_VERSION'].trim() === '')) {
+        envToSend['SERVER_VERSION'] = 'latest';
+      }
+      if (formData.startup.includes('VANILLA_VERSION') && (!envToSend['VANILLA_VERSION'] || envToSend['VANILLA_VERSION'].trim() === '')) {
+        envToSend['VANILLA_VERSION'] = 'latest';
+      }
+
+      console.log('Dispatching server creation with environment payload:', envToSend);
+
       const res = await api.createServer({
         name: formData.name.trim(),
         description: formData.description.trim(),
@@ -863,14 +879,17 @@ export const CreateServerWizard: React.FC = () => {
                   </div>
                   {eggVariables.length > 0 && (
                     <div className="py-2.5">
-                      <div className="text-slate-400 mb-1.5 font-medium">Environment Variables:</div>
+                      <div className="text-slate-400 mb-1.5 font-medium">Environment Variables ({eggVariables.length}):</div>
                       <div className="space-y-1 font-mono text-[11px] bg-[#100D1A] p-2.5 rounded-lg border border-purple-900/20">
-                        {eggVariables.map((v) => (
-                          <div key={v.envVariable} className="flex justify-between items-center py-0.5">
-                            <span className="text-slate-400">{v.envVariable}:</span>
-                            <span className="text-purple-300 font-semibold">{environmentValues[v.envVariable] || '—'}</span>
-                          </div>
-                        ))}
+                        {eggVariables.map((v) => {
+                          const val = environmentValues[v.envVariable] || v.defaultValue || '—';
+                          return (
+                            <div key={v.envVariable} className="flex justify-between items-center py-0.5">
+                              <span className="text-slate-400">{v.name} ({v.envVariable}):</span>
+                              <span className="text-purple-300 font-semibold">{val}</span>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
