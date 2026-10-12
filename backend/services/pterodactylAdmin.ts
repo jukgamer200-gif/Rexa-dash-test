@@ -41,6 +41,73 @@ async function callPterodactylApp(endpoint: string, method = 'GET', body?: any) 
   return response.json();
 }
 
+// Safely extracts variables array from Pterodactyl egg payload regardless of Fractal nesting
+function extractVariablesFromEggData(data: any): any[] {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+
+  // Path 1: data.attributes.relationships.variables.data
+  if (Array.isArray(data.attributes?.relationships?.variables?.data)) {
+    return data.attributes.relationships.variables.data;
+  }
+  // Path 2: data.relationships?.variables?.data
+  if (Array.isArray(data.relationships?.variables?.data)) {
+    return data.relationships.variables.data;
+  }
+  // Path 3: data.attributes?.relationships?.variables (direct array)
+  if (Array.isArray(data.attributes?.relationships?.variables)) {
+    return data.attributes.relationships.variables;
+  }
+  // Path 4: data.relationships?.variables (direct array)
+  if (Array.isArray(data.relationships?.variables)) {
+    return data.relationships.variables;
+  }
+  // Path 5: data.attributes?.variables?.data
+  if (Array.isArray(data.attributes?.variables?.data)) {
+    return data.attributes.variables.data;
+  }
+  // Path 6: data.attributes?.variables (direct array)
+  if (Array.isArray(data.attributes?.variables)) {
+    return data.attributes.variables;
+  }
+  // Path 7: data.variables (direct array)
+  if (Array.isArray(data.variables)) {
+    return data.variables;
+  }
+  // Path 8: unwrap data.data
+  if (data.data && typeof data.data === 'object') {
+    return extractVariablesFromEggData(data.data);
+  }
+  return [];
+}
+
+// Parses a single raw variable object into a normalized EggVariable
+function parseEggVariable(item: any): EggVariable | null {
+  if (!item) return null;
+  const a = item.attributes || item;
+  const envVar = a.env_variable || a.envVariable;
+  if (!envVar || typeof envVar !== 'string') return null;
+
+  const rules = typeof a.rules === 'string' ? a.rules : '';
+  const isRequired = rules.split('|').some((r: string) => r.trim().toLowerCase() === 'required');
+  return {
+    id: Number(a.id) || 0,
+    name: a.name || envVar,
+    description: a.description || '',
+    envVariable: envVar.trim(),
+    defaultValue:
+      a.default_value !== null && a.default_value !== undefined
+        ? String(a.default_value)
+        : a.defaultValue !== null && a.defaultValue !== undefined
+        ? String(a.defaultValue)
+        : '',
+    userViewable: Boolean(a.user_viewable ?? a.userViewable ?? true),
+    userEditable: Boolean(a.user_editable ?? a.userEditable ?? true),
+    rules,
+    isRequired,
+  };
+}
+
 export const pterodactylAdmin = {
   isConfigured(): boolean {
     return !!(config.pterodactylUrl && config.applicationApiKey);
@@ -240,7 +307,45 @@ export const pterodactylAdmin = {
     if (!this.isConfigured()) {
       throw new Error('Pterodactyl Application API is not configured.');
     }
-    return callPterodactylApp(`/nests/${nestId}/eggs/${eggId}?include=variables`);
+
+    // Attempt 1: Fetch directly from /nests/{nestId}/eggs/{eggId}?include=variables
+    try {
+      const data = await callPterodactylApp(`/nests/${nestId}/eggs/${eggId}?include=variables`);
+      const vars = extractVariablesFromEggData(data);
+      if (vars.length > 0 || data.attributes) {
+        return data;
+      }
+    } catch (err: any) {
+      console.warn(`[Pterodactyl Admin] Direct egg fetch failed for nest ${nestId}, egg ${eggId}: ${err.message}`);
+    }
+
+    // Attempt 2: Fetch nest eggs collection /nests/{nestId}/eggs?include=variables
+    try {
+      const collection = await callPterodactylApp(`/nests/${nestId}/eggs?include=variables`);
+      const eggsList = collection.data || collection || [];
+      const match = eggsList.find((e: any) => {
+        const id = e.attributes?.id || e.id;
+        return Number(id) === Number(eggId);
+      });
+      if (match) {
+        return match;
+      }
+    } catch (err: any) {
+      console.warn(`[Pterodactyl Admin] Collection fallback failed for nest ${nestId}: ${err.message}`);
+    }
+
+    // Attempt 3: Discover which nest actually owns eggId across all nests
+    const nests = await this.getNests().catch(() => []);
+    for (const n of nests) {
+      if (n.id !== nestId && n.eggs?.some((e) => e.id === Number(eggId))) {
+        try {
+          const data = await callPterodactylApp(`/nests/${n.id}/eggs/${eggId}?include=variables`);
+          if (data) return data;
+        } catch {}
+      }
+    }
+
+    throw new Error(`Unable to load egg #${eggId} from Pterodactyl nest #${nestId}.`);
   },
 
   async getEggVariables(nestId: number, eggId: number): Promise<EggVariable[]> {
@@ -248,24 +353,23 @@ export const pterodactylAdmin = {
       return [];
     }
 
-    const data = await callPterodactylApp(`/nests/${nestId}/eggs/${eggId}?include=variables`);
-    const rawVars = data.attributes?.relationships?.variables?.data || [];
-    return rawVars.map((item: any) => {
-      const a = item.attributes;
-      const rules = typeof a.rules === 'string' ? a.rules : '';
-      const isRequired = rules.split('|').some((r: string) => r.trim().toLowerCase() === 'required');
-      return {
-        id: a.id,
-        name: a.name,
-        description: a.description || '',
-        envVariable: a.env_variable,
-        defaultValue: a.default_value !== null && a.default_value !== undefined ? String(a.default_value) : '',
-        userViewable: Boolean(a.user_viewable ?? true),
-        userEditable: Boolean(a.user_editable ?? true),
-        rules,
-        isRequired,
-      };
-    });
+    // Discover the true nest ID if mismatched
+    let targetNestId = Number(nestId);
+    const nests = await this.getNests().catch(() => []);
+    const matchingNest = nests.find((n) => n.eggs?.some((e) => e.id === Number(eggId)));
+    if (matchingNest) {
+      targetNestId = matchingNest.id;
+    }
+
+    console.log(`[Pterodactyl Admin] getEggVariables: querying Nest #${targetNestId}, Egg #${eggId}`);
+    const eggData = await this.getEgg(targetNestId, eggId);
+    const rawVars = extractVariablesFromEggData(eggData);
+    const parsed = rawVars
+      .map((item: any) => parseEggVariable(item))
+      .filter((v: EggVariable | null): v is EggVariable => v !== null);
+
+    console.log(`[Pterodactyl Admin] getEggVariables: found ${parsed.length} variables for Egg #${eggId}: [${parsed.map(v => `${v.name} (${v.envVariable}, req=${v.isRequired}, default="${v.defaultValue}")`).join(', ')}]`);
+    return parsed;
   },
 
   async listAllServers(): Promise<any[]> {
@@ -298,17 +402,15 @@ export const pterodactylAdmin = {
       throw new Error('An eligible allocation ID is required to create a server.');
     }
 
-    // 2. Discover or use nest ID to inspect the selected egg's variable definitions
+    // 2. Discover or verify the exact nest ID that owns this egg
     let eggNestId = Number(payload.nestId);
-    if (!eggNestId) {
-      const nests = await this.getNests().catch(() => []);
-      for (const n of nests) {
-        if (n.eggs?.some((e) => e.id === Number(payload.eggId))) {
-          eggNestId = n.id;
-          break;
-        }
-      }
+    const nests = await this.getNests().catch(() => []);
+    const matchingNest = nests.find((n) => n.eggs?.some((e) => e.id === Number(payload.eggId)));
+    if (matchingNest) {
+      eggNestId = matchingNest.id;
     }
+
+    console.log(`[Pterodactyl Admin] createServer: target nest #${eggNestId}, egg #${payload.eggId}, server "${payload.name}"`);
 
     // 3. Fetch egg variable definitions and attributes from Pterodactyl Application API
     let eggVariables: EggVariable[] = [];
@@ -316,38 +418,28 @@ export const pterodactylAdmin = {
     if (eggNestId && payload.eggId) {
       try {
         const eggData = await this.getEgg(eggNestId, Number(payload.eggId));
-        eggAttributes = eggData.attributes;
-        const rawVars = eggAttributes?.relationships?.variables?.data || [];
-        eggVariables = rawVars.map((item: any) => {
-          const a = item.attributes;
-          const rules = typeof a.rules === 'string' ? a.rules : '';
-          const isRequired = rules.split('|').some((r: string) => r.trim().toLowerCase() === 'required');
-          return {
-            id: a.id,
-            name: a.name,
-            description: a.description || '',
-            envVariable: a.env_variable,
-            defaultValue: a.default_value !== null && a.default_value !== undefined ? String(a.default_value) : '',
-            userViewable: Boolean(a.user_viewable ?? true),
-            userEditable: Boolean(a.user_editable ?? true),
-            rules,
-            isRequired,
-          };
-        });
+        eggAttributes = eggData.attributes || eggData;
+        const rawVars = extractVariablesFromEggData(eggData);
+        eggVariables = rawVars
+          .map((item: any) => parseEggVariable(item))
+          .filter((v: EggVariable | null): v is EggVariable => v !== null);
+        console.log(`[Pterodactyl Admin] createServer: loaded ${eggVariables.length} egg variables from Pterodactyl: [${eggVariables.map(v => `${v.name} (${v.envVariable}, req=${v.isRequired})`).join(', ')}]`);
       } catch (err: any) {
-        console.warn(`Could not load variables for nest ${eggNestId}, egg ${payload.eggId}: ${err.message}`);
+        console.warn(`[Pterodactyl Admin] createServer: could not load egg variables for nest ${eggNestId}, egg ${payload.eggId}: ${err.message}`);
       }
     }
 
     // 4. Construct and validate environment variables against the egg's definitions
     const userEnv = payload.environment || {};
+    console.log(`[Pterodactyl Admin] createServer: received environment keys from client: [${Object.keys(userEnv).join(', ')}]`);
+
     const finalEnvironment: Record<string, string> = { ...userEnv };
 
     for (const v of eggVariables) {
       const key = v.envVariable;
       let val = userEnv[key];
 
-      // If missing or blank, use egg's default_value if provided
+      // If user did not provide a non-empty value, check egg's default_value
       if (val === undefined || val === null || (typeof val === 'string' && val.trim() === '')) {
         if (v.defaultValue !== undefined && v.defaultValue !== null && String(v.defaultValue).trim() !== '') {
           val = String(v.defaultValue).trim();
@@ -357,6 +449,7 @@ export const pterodactylAdmin = {
       // If required, confirm it has a valid non-empty value
       if (v.isRequired) {
         if (val === undefined || val === null || String(val).trim() === '') {
+          console.warn(`[Pterodactyl Admin] createServer validation failed: missing required variable "${v.name}" (${key})`);
           throw new Error(`The ${v.name} variable field (${key}) is required.`);
         }
       }
@@ -365,6 +458,8 @@ export const pterodactylAdmin = {
         finalEnvironment[key] = String(val);
       }
     }
+
+    console.log(`[Pterodactyl Admin] createServer: finalEnvironment keys to Pterodactyl: [${Object.keys(finalEnvironment).map(k => `${k}=${finalEnvironment[k] ? '[SET]' : '[EMPTY]'}`).join(', ')}]`);
 
     const dockerImage = payload.dockerImage || eggAttributes?.docker_image || 'ghcr.io/pterodactyl/yolks:java_21';
     const startup = payload.startup || eggAttributes?.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}';

@@ -121,9 +121,11 @@ export const adminController = {
         return res.status(503).json({ error: 'Service Unavailable', message: 'Pterodactyl Application API is not configured.' });
       }
 
+      console.log(`[Admin Controller] getEggVariables requested for nest #${nestId}, egg #${eggId}`);
       const variables = await pterodactylAdmin.getEggVariables(nestId, eggId);
       return res.json({ variables });
     } catch (err: any) {
+      console.error(`[Admin Controller] getEggVariables failed for nest #${req.params.nestId}, egg #${req.params.eggId}: ${err.message}`);
       return res.status(500).json({ error: 'Failed to fetch egg variables', message: err.message });
     }
   },
@@ -186,6 +188,8 @@ export const adminController = {
       }
 
       const { name, limits, eggId, nestId, nodeId, allocationId, allocation, userId } = req.body;
+      const envKeys = Object.keys(req.body.environment || {});
+      console.log(`[Admin Controller] createServer request: name="${name}", eggId=${eggId}, nestId=${nestId}, nodeId=${nodeId}, allocationId=${allocationId}, envKeys=[${envKeys.join(', ')}]`);
 
       // 3. Name Validation
       if (!name || typeof name !== 'string' || name.trim().length === 0) {

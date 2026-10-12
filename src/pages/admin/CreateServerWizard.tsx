@@ -129,6 +129,7 @@ export const CreateServerWizard: React.FC = () => {
   const loadEggVariables = async (nestId: number, eggId: number) => {
     if (!nestId || !eggId) {
       setEggVariables([]);
+      setEnvironmentValues({});
       return;
     }
     setIsLoadingVariables(true);
@@ -138,18 +139,22 @@ export const CreateServerWizard: React.FC = () => {
       setEggVariables(vars);
 
       // Prepopulate environment values with default values from the egg
+      // and remove stale keys from previous eggs
       setEnvironmentValues((prev) => {
-        const nextEnv: Record<string, string> = { ...prev };
+        const nextEnv: Record<string, string> = {};
         for (const v of vars) {
-          if (nextEnv[v.envVariable] === undefined || nextEnv[v.envVariable] === '') {
+          if (prev[v.envVariable] !== undefined && prev[v.envVariable] !== '') {
+            nextEnv[v.envVariable] = prev[v.envVariable];
+          } else {
             nextEnv[v.envVariable] = v.defaultValue ?? '';
           }
         }
         return nextEnv;
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load egg variables:', err);
       setEggVariables([]);
+      setError(`Notice: Could not load egg variables: ${err.message}`);
     } finally {
       setIsLoadingVariables(false);
     }
@@ -195,22 +200,27 @@ export const CreateServerWizard: React.FC = () => {
       loadEggVariables(newNestId, newEggId);
     } else {
       setEggVariables([]);
+      setEnvironmentValues({});
     }
   };
 
   const handleEggChange = (newEggId: number) => {
-    const nest = nests.find((n) => n.id === formData.nestId);
-    const egg = nest?.eggs?.find((e) => e.id === newEggId);
+    const matchingNest = nests.find((n) => n.eggs?.some((e) => e.id === newEggId)) || nests.find((n) => n.id === formData.nestId);
+    const egg = matchingNest?.eggs?.find((e) => e.id === newEggId);
+    const targetNestId = matchingNest?.id || formData.nestId;
+
     setFormData((prev) => ({
       ...prev,
+      nestId: targetNestId,
       eggId: newEggId,
       dockerImage: egg?.dockerImage || prev.dockerImage,
       startup: egg?.startup || prev.startup,
     }));
-    if (formData.nestId && newEggId) {
-      loadEggVariables(formData.nestId, newEggId);
+    if (targetNestId && newEggId) {
+      loadEggVariables(targetNestId, newEggId);
     } else {
       setEggVariables([]);
+      setEnvironmentValues({});
     }
   };
 
@@ -271,6 +281,14 @@ export const CreateServerWizard: React.FC = () => {
     setIsSubmitting(true);
     setError(null);
     try {
+      // Ensure all egg variables have either the entered value or the egg default
+      const envToSend: Record<string, string> = { ...environmentValues };
+      for (const v of eggVariables) {
+        if ((envToSend[v.envVariable] === undefined || envToSend[v.envVariable] === '') && v.defaultValue) {
+          envToSend[v.envVariable] = v.defaultValue;
+        }
+      }
+
       const res = await api.createServer({
         name: formData.name.trim(),
         description: formData.description.trim(),
@@ -281,7 +299,7 @@ export const CreateServerWizard: React.FC = () => {
         allocationId: formData.allocationId,
         dockerImage: formData.dockerImage,
         startup: formData.startup,
-        environment: environmentValues,
+        environment: envToSend,
         limits: {
           memory: Math.min(Math.max(1, Math.floor(formData.memoryMB)), MAX_RAM_MB),
           swap: 0,
