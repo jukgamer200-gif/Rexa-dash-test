@@ -48,6 +48,7 @@ api.get('/admin/nodes/:id/readiness', requireAuth, requireAdmin, adminController
 api.get('/admin/locations', requireAuth, requireAdmin, adminController.listLocations);
 api.post('/admin/locations', requireAuth, requireAdmin, adminController.createLocation);
 api.get('/admin/nests', requireAuth, requireAdmin, adminController.listNests);
+api.get('/admin/nests/:nestId/eggs/:eggId/variables', requireAuth, requireAdmin, adminController.getEggVariables);
 api.post('/admin/servers', requireAuth, requireAdmin, adminController.createServer);
 api.post('/admin/servers/:id/suspend', requireAuth, requireAdmin, adminController.suspendServer);
 api.post('/admin/servers/:id/unsuspend', requireAuth, requireAdmin, adminController.unsuspendServer);

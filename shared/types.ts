@@ -178,6 +178,18 @@ export interface AdminLocation {
   serversCount: number;
 }
 
+export interface EggVariable {
+  id: number;
+  name: string;
+  description: string;
+  envVariable: string;
+  defaultValue: string;
+  userViewable: boolean;
+  userEditable: boolean;
+  rules: string;
+  isRequired: boolean;
+}
+
 export interface AdminEgg {
   id: number;
   name: string;
@@ -186,6 +198,7 @@ export interface AdminEgg {
   description: string;
   dockerImage: string;
   startup: string;
+  variables?: EggVariable[];
 }
 
 export interface AdminNest {

@@ -109,6 +109,25 @@ export const adminController = {
     }
   },
 
+  async getEggVariables(req: AuthenticatedRequest, res: Response) {
+    try {
+      const nestId = Number(req.params.nestId);
+      const eggId = Number(req.params.eggId);
+      if (isNaN(nestId) || isNaN(eggId)) {
+        return res.status(400).json({ error: 'Validation Error', message: 'Valid nest ID and egg ID are required.' });
+      }
+
+      if (!pterodactylAdmin.isConfigured()) {
+        return res.status(503).json({ error: 'Service Unavailable', message: 'Pterodactyl Application API is not configured.' });
+      }
+
+      const variables = await pterodactylAdmin.getEggVariables(nestId, eggId);
+      return res.json({ variables });
+    } catch (err: any) {
+      return res.status(500).json({ error: 'Failed to fetch egg variables', message: err.message });
+    }
+  },
+
   async getNodeAllocations(req: AuthenticatedRequest, res: Response) {
     try {
       const nodeId = Number(req.params.id);
@@ -261,7 +280,10 @@ export const adminController = {
 
       return res.status(201).json({ success: true, server: result });
     } catch (err: any) {
-      return res.status(500).json({ error: 'Failed to create server', message: err.message });
+      const msg = err.message || 'Failed to create server';
+      const isValidationError = msg.includes('required') || msg.includes('limit') || msg.includes('positive integer') || msg.includes('Invalid') || msg.includes('422');
+      const status = isValidationError ? 400 : 500;
+      return res.status(status).json({ error: isValidationError ? 'Validation Error' : 'Failed to create server', message: msg });
     }
   },
 
