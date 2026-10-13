@@ -7,6 +7,7 @@
 
 import { config } from '../config.js';
 import { AdminNode, AdminLocation, AdminNest, AdminEgg, EggVariable, CreateServerRequest, SystemConnectionStatus } from '@/shared/types';
+import { extractVariablesFromEggData, parseEggVariable, validateAndBuildEnvironment } from './pterodactylVariables.js';
 
 // Helper to call official Application API
 async function callPterodactylApp(endpoint: string, method = 'GET', body?: any) {
@@ -41,101 +42,7 @@ async function callPterodactylApp(endpoint: string, method = 'GET', body?: any) 
   return response.json();
 }
 
-// Safely extracts variables array from Pterodactyl egg payload regardless of Fractal nesting
-function extractVariablesFromEggData(data: any): any[] {
-  if (!data) return [];
-  if (Array.isArray(data)) {
-    // If it's an array of variable items, return directly
-    if (data.length > 0 && (data[0]?.attributes?.env_variable || data[0]?.env_variable || data[0]?.attributes?.envVariable)) {
-      return data;
-    }
-    // If it's an array containing an egg object, extract from first item
-    if (data.length > 0 && (data[0]?.attributes?.relationships || data[0]?.relationships)) {
-      return extractVariablesFromEggData(data[0]);
-    }
-    return data;
-  }
-
-  // Path 1: data.attributes.relationships.variables.data
-  if (Array.isArray(data.attributes?.relationships?.variables?.data)) {
-    return data.attributes.relationships.variables.data;
-  }
-  // Path 2: data.relationships?.variables?.data
-  if (Array.isArray(data.relationships?.variables?.data)) {
-    return data.relationships.variables.data;
-  }
-  // Path 3: data.attributes?.relationships?.variables (direct array)
-  if (Array.isArray(data.attributes?.relationships?.variables)) {
-    return data.attributes.relationships.variables;
-  }
-  // Path 4: data.relationships?.variables (direct array)
-  if (Array.isArray(data.relationships?.variables)) {
-    return data.relationships.variables;
-  }
-  // Path 5: data.attributes?.relationships?.egg_variables?.data
-  if (Array.isArray(data.attributes?.relationships?.egg_variables?.data)) {
-    return data.attributes.relationships.egg_variables.data;
-  }
-  // Path 6: data.relationships?.egg_variables?.data
-  if (Array.isArray(data.relationships?.egg_variables?.data)) {
-    return data.relationships.egg_variables.data;
-  }
-  // Path 7: data.attributes?.variables?.data
-  if (Array.isArray(data.attributes?.variables?.data)) {
-    return data.attributes.variables.data;
-  }
-  // Path 8: data.attributes?.variables (direct array)
-  if (Array.isArray(data.attributes?.variables)) {
-    return data.attributes.variables;
-  }
-  // Path 9: data.variables (direct array)
-  if (Array.isArray(data.variables)) {
-    return data.variables;
-  }
-  // Path 10: unwrap data.data
-  if (data.data && typeof data.data === 'object') {
-    const unwrapRes = extractVariablesFromEggData(data.data);
-    if (unwrapRes.length > 0) return unwrapRes;
-  }
-  // Path 11: unwrap data.attributes
-  if (data.attributes && typeof data.attributes === 'object') {
-    const attrRes = extractVariablesFromEggData(data.attributes);
-    if (attrRes.length > 0) return attrRes;
-  }
-  return [];
-}
-
-// Parses a single raw variable object into a normalized EggVariable
-function parseEggVariable(item: any): EggVariable | null {
-  if (!item) return null;
-  const a = item.attributes || item;
-  const envVar = a.env_variable || a.envVariable || a.env || a.variable;
-  if (!envVar || typeof envVar !== 'string') return null;
-
-  const rules = typeof a.rules === 'string' ? a.rules : '';
-  const isRequired =
-    Boolean(a.required || a.is_required) ||
-    rules.split('|').some((r: string) => r.trim().toLowerCase() === 'required');
-
-  const rawDefault =
-    a.default_value !== null && a.default_value !== undefined
-      ? String(a.default_value)
-      : a.defaultValue !== null && a.defaultValue !== undefined
-      ? String(a.defaultValue)
-      : '';
-
-  return {
-    id: Number(a.id) || 0,
-    name: a.name || envVar,
-    description: a.description || '',
-    envVariable: envVar.trim(),
-    defaultValue: rawDefault,
-    userViewable: Boolean(a.user_viewable ?? a.userViewable ?? true),
-    userEditable: Boolean(a.user_editable ?? a.userEditable ?? true),
-    rules,
-    isRequired,
-  };
-}
+// Variables parser, relationship extractor and environment validator imported from ./pterodactylVariables.js
 
 export const pterodactylAdmin = {
   isConfigured(): boolean {
@@ -306,20 +213,36 @@ export const pterodactylAdmin = {
       return [];
     }
 
-    const data = await callPterodactylApp('/nests?include=eggs');
+    let data: any;
+    try {
+      // First attempt: fetch nests with eggs and their nested variable relationships
+      data = await callPterodactylApp('/nests?include=eggs.variables');
+    } catch {
+      // Fallback: standard eggs inclusion
+      data = await callPterodactylApp('/nests?include=eggs');
+    }
+
     return (data.data || []).map((n: any) => ({
       id: n.attributes.id,
       name: n.attributes.name,
       description: n.attributes.description,
-      eggs: (n.attributes.relationships?.eggs?.data || []).map((e: any) => ({
-        id: e.attributes.id,
-        nestId: n.attributes.id,
-        nestName: n.attributes.name,
-        name: e.attributes.name,
-        description: e.attributes.description,
-        dockerImage: e.attributes.docker_image,
-        startup: e.attributes.startup,
-      })),
+      eggs: (n.attributes.relationships?.eggs?.data || []).map((e: any) => {
+        const rawVars = extractVariablesFromEggData(e);
+        const parsedVars = rawVars
+          .map((item: any) => parseEggVariable(item))
+          .filter((v: EggVariable | null): v is EggVariable => v !== null);
+
+        return {
+          id: e.attributes.id,
+          nestId: n.attributes.id,
+          nestName: n.attributes.name,
+          name: e.attributes.name,
+          description: e.attributes.description,
+          dockerImage: e.attributes.docker_image,
+          startup: e.attributes.startup,
+          variables: parsedVars,
+        };
+      }),
     }));
   },
 
@@ -425,108 +348,30 @@ export const pterodactylAdmin = {
       targetNestId = matchingNest.id;
     }
 
-    console.log(`[Pterodactyl Admin] getEggVariables: querying Nest #${targetNestId}, Egg #${eggId}`);
-    let eggData: any = null;
+    let parsed: EggVariable[] = [];
     try {
-      eggData = await this.getEgg(targetNestId, eggId);
+      const eggData = await this.getEgg(targetNestId, eggId);
+      const rawVars = extractVariablesFromEggData(eggData);
+      parsed = rawVars
+        .map((item: any) => parseEggVariable(item))
+        .filter((v: EggVariable | null): v is EggVariable => v !== null);
     } catch (err: any) {
-      console.warn(`[Pterodactyl Admin] getEggVariables: error fetching egg data: ${err.message}`);
+      console.warn(`[Pterodactyl Admin] getEgg warning in getEggVariables: ${err.message}`);
     }
 
-    const rawVars = eggData ? extractVariablesFromEggData(eggData) : [];
-    const parsed = rawVars
-      .map((item: any) => parseEggVariable(item))
-      .filter((v: EggVariable | null): v is EggVariable => v !== null);
-
-    // If Pterodactyl returned 0 variables, infer required variables from startup command and egg metadata
-    if (parsed.length === 0 && eggData) {
-      const eggAttr = eggData.attributes || eggData;
-      const startup = String(eggAttr.startup || '').trim();
-      const eggName = String(eggAttr.name || '').toLowerCase();
-      const dockerImage = String(eggAttr.docker_image || '').toLowerCase();
-
-      console.log(`[Pterodactyl Admin] getEggVariables: Pterodactyl returned 0 variables. Checking startup script and egg type: "${startup}" (${eggName})`);
-
-      // 1. Check for {{SERVER_JARFILE}} or Minecraft-type eggs
-      if (startup.includes('SERVER_JARFILE') || eggName.includes('minecraft') || eggName.includes('paper') || eggName.includes('purpur') || eggName.includes('spigot') || eggName.includes('vanilla') || dockerImage.includes('java')) {
-        parsed.push({
-          id: 1,
-          name: 'Server Jar File',
-          description: 'The name of the executable server jar file to run (default: server.jar).',
-          envVariable: 'SERVER_JARFILE',
-          defaultValue: 'server.jar',
-          userViewable: true,
-          userEditable: true,
-          rules: 'required|string|max:40',
-          isRequired: true,
-        });
-      }
-
-      // 2. Check for {{BUILD_NUMBER}} or Paper / Purpur / Waterfall
-      if (startup.includes('BUILD_NUMBER') || eggName.includes('paper') || eggName.includes('purpur') || eggName.includes('waterfall') || eggName.includes('velocity')) {
-        parsed.push({
-          id: 2,
-          name: 'Build Number',
-          description: 'The specific build number to download, or "latest" to use the newest build.',
-          envVariable: 'BUILD_NUMBER',
-          defaultValue: 'latest',
-          userViewable: true,
-          userEditable: true,
-          rules: 'required|string|max:20',
-          isRequired: true,
-        });
-      }
-
-      // 3. Check for {{SERVER_VERSION}} or {{VANILLA_VERSION}}
-      if (startup.includes('SERVER_VERSION') || eggName.includes('vanilla') || eggName.includes('fabric') || eggName.includes('forge')) {
-        parsed.push({
-          id: 3,
-          name: 'Server Version',
-          description: 'The Minecraft game version to install, or "latest" for the newest release.',
-          envVariable: 'SERVER_VERSION',
-          defaultValue: 'latest',
-          userViewable: true,
-          userEditable: true,
-          rules: 'required|string|max:20',
-          isRequired: true,
-        });
-      }
-
-      if (startup.includes('VANILLA_VERSION')) {
-        parsed.push({
-          id: 4,
-          name: 'Vanilla Version',
-          description: 'The vanilla release version to run, or "latest".',
-          envVariable: 'VANILLA_VERSION',
-          defaultValue: 'latest',
-          userViewable: true,
-          userEditable: true,
-          rules: 'required|string|max:20',
-          isRequired: true,
-        });
-      }
-
-      // 4. Extract any other {{VARIABLE}} placeholders from startup script
-      const startupVars = startup.match(/\{\{([A-Za-z0-9_]+)\}\}/g) || [];
-      for (const rawPlaceholder of startupVars) {
-        const vKey = rawPlaceholder.replace(/[{}]/g, '').trim();
-        if (vKey && !parsed.some((p) => p.envVariable === vKey)) {
-          parsed.push({
-            id: parsed.length + 1,
-            name: vKey.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-            description: `Environment variable referenced by container startup: ${vKey}`,
-            envVariable: vKey,
-            defaultValue: '',
-            userViewable: true,
-            userEditable: true,
-            rules: 'required|string',
-            isRequired: true,
-          });
+    // If direct egg query returned 0 variables, check if nests already has them
+    if (parsed.length === 0) {
+      for (const n of nests) {
+        const found = n.eggs?.find((e: any) => Number(e.id) === Number(eggId));
+        if (found?.variables && found.variables.length > 0) {
+          parsed = found.variables;
+          break;
         }
       }
     }
 
-    console.log(`[Pterodactyl Admin] getEggVariables: returning ${parsed.length} variables for Egg #${eggId}: [${parsed.map(v => `${v.name} (${v.envVariable}, req=${v.isRequired}, default="${v.defaultValue}")`).join(', ')}]`);
+    const requiredKeys = parsed.filter(v => v.isRequired).map(v => v.envVariable);
+    console.log(`[Pterodactyl Admin] getEggVariables: Egg #${eggId} has ${parsed.length} variables (${requiredKeys.length} required: [${requiredKeys.join(', ')}])`);
     return parsed;
   },
 
@@ -568,81 +413,70 @@ export const pterodactylAdmin = {
       eggNestId = matchingNest.id;
     }
 
-    console.log(`[Pterodactyl Admin] createServer: target nest #${eggNestId}, egg #${payload.eggId}, server "${payload.name}"`);
-
     // 3. Fetch egg variable definitions and attributes from Pterodactyl Application API
     let eggVariables: EggVariable[] = [];
     let eggAttributes: any = null;
-    if (eggNestId && payload.eggId) {
-      try {
-        eggVariables = await this.getEggVariables(eggNestId, Number(payload.eggId));
-        const eggData = await this.getEgg(eggNestId, Number(payload.eggId)).catch(() => null);
-        if (eggData) {
-          eggAttributes = eggData.attributes || eggData;
+    try {
+      const eggData = await this.getEgg(eggNestId, Number(payload.eggId));
+      if (eggData) {
+        eggAttributes = eggData.attributes || eggData;
+        const rawVars = extractVariablesFromEggData(eggData);
+        eggVariables = rawVars
+          .map((item: any) => parseEggVariable(item))
+          .filter((v: EggVariable | null): v is EggVariable => v !== null);
+      }
+    } catch (err: any) {
+      console.warn(`[Pterodactyl Admin] getEgg warning in createServer for nest #${eggNestId}, egg #${payload.eggId}: ${err.message}`);
+    }
+
+    // Fallback: If direct getEgg returned no variables, check getNests()
+    if (eggVariables.length === 0) {
+      for (const n of nests) {
+        const found = n.eggs?.find((e: any) => Number(e.id) === Number(payload.eggId));
+        if (found?.variables && found.variables.length > 0) {
+          eggVariables = found.variables;
+          if (!eggAttributes) eggAttributes = found;
+          break;
         }
-        console.log(`[Pterodactyl Admin] createServer: loaded ${eggVariables.length} egg variables: [${eggVariables.map(v => `${v.name} (${v.envVariable}, req=${v.isRequired})`).join(', ')}]`);
-      } catch (err: any) {
-        console.warn(`[Pterodactyl Admin] createServer: could not load egg variables for nest ${eggNestId}, egg ${payload.eggId}: ${err.message}`);
       }
     }
 
-    // 4. Construct and validate environment variables against the egg's definitions
-    const userEnv = payload.environment || {};
-    console.log(`[Pterodactyl Admin] createServer: received environment from client: [${Object.entries(userEnv).map(([k, v]) => `${k}=${v ? '[SET]' : '[EMPTY]'}`).join(', ')}]`);
+    // 4. Validate and build environment strictly against the Egg's definitions
+    const userEnv = (payload.environment && typeof payload.environment === 'object') ? payload.environment : {};
+    const validation = validateAndBuildEnvironment(eggVariables, userEnv);
 
-    const finalEnvironment: Record<string, string> = { ...userEnv };
-
-    for (const v of eggVariables) {
-      const key = v.envVariable;
-      let val = userEnv[key];
-
-      // If user did not provide a non-empty value, check egg's default_value
-      if (val === undefined || val === null || (typeof val === 'string' && val.trim() === '')) {
-        if (v.defaultValue !== undefined && v.defaultValue !== null && String(v.defaultValue).trim() !== '') {
-          val = String(v.defaultValue).trim();
-        }
-      }
-
-      // If required, confirm it has a valid non-empty value
-      if (v.isRequired) {
-        if (val === undefined || val === null || String(val).trim() === '') {
-          // Check standard fallbacks for common Minecraft variables before failing
-          if (key === 'SERVER_JARFILE') {
-            val = 'server.jar';
-          } else if (key === 'BUILD_NUMBER') {
-            val = 'latest';
-          } else if (key === 'SERVER_VERSION' || key === 'VANILLA_VERSION') {
-            val = 'latest';
-          } else {
-            console.warn(`[Pterodactyl Admin] createServer validation failed: missing required variable "${v.name}" (${key})`);
-            throw new Error(`The ${v.name} variable field (${key}) is required.`);
-          }
-        }
-      }
-
-      if (val !== undefined && val !== null) {
-        finalEnvironment[key] = String(val);
-      }
+    if (!validation.valid) {
+      const missingList = validation.missingRequired.map(m => `"${m.name}" (${m.key})`).join('; ');
+      console.warn(`[Pterodactyl Admin] createServer validation rejected: missing required variables [${missingList}]`);
+      throw new Error(`The following required environment variables are missing: ${missingList}`);
     }
 
-    // Extra safety net: Check startup script for any remaining {{VAR}} placeholders
+    const finalEnvironment = { ...validation.environment };
+
     const dockerImage = payload.dockerImage || eggAttributes?.docker_image || 'ghcr.io/pterodactyl/yolks:java_21';
     const startup = payload.startup || eggAttributes?.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}';
 
-    if (startup.includes('{{SERVER_JARFILE}}') && (!finalEnvironment['SERVER_JARFILE'] || finalEnvironment['SERVER_JARFILE'].trim() === '')) {
+    // Extra safety net: Check startup script and egg identity to guarantee canonical Minecraft variables are NEVER omitted
+    if (startup.includes('SERVER_JARFILE') && (!finalEnvironment['SERVER_JARFILE'] || finalEnvironment['SERVER_JARFILE'].trim() === '')) {
       finalEnvironment['SERVER_JARFILE'] = 'server.jar';
     }
-    if ((startup.includes('{{BUILD_NUMBER}}') || payload.name?.toLowerCase().includes('paper')) && (!finalEnvironment['BUILD_NUMBER'] || finalEnvironment['BUILD_NUMBER'].trim() === '')) {
+    if ((startup.includes('BUILD_NUMBER') || payload.name.toLowerCase().includes('paper')) && (!finalEnvironment['BUILD_NUMBER'] || finalEnvironment['BUILD_NUMBER'].trim() === '')) {
       finalEnvironment['BUILD_NUMBER'] = 'latest';
     }
-    if (startup.includes('{{SERVER_VERSION}}') && (!finalEnvironment['SERVER_VERSION'] || finalEnvironment['SERVER_VERSION'].trim() === '')) {
+    if (startup.includes('SERVER_VERSION') && (!finalEnvironment['SERVER_VERSION'] || finalEnvironment['SERVER_VERSION'].trim() === '')) {
       finalEnvironment['SERVER_VERSION'] = 'latest';
     }
-    if (startup.includes('{{VANILLA_VERSION}}') && (!finalEnvironment['VANILLA_VERSION'] || finalEnvironment['VANILLA_VERSION'].trim() === '')) {
+    if (startup.includes('VANILLA_VERSION') && (!finalEnvironment['VANILLA_VERSION'] || finalEnvironment['VANILLA_VERSION'].trim() === '')) {
       finalEnvironment['VANILLA_VERSION'] = 'latest';
     }
+    if (startup.includes('MINECRAFT_VERSION') && (!finalEnvironment['MINECRAFT_VERSION'] || finalEnvironment['MINECRAFT_VERSION'].trim() === '')) {
+      finalEnvironment['MINECRAFT_VERSION'] = 'latest';
+    }
 
-    console.log(`[Pterodactyl Admin] createServer: dispatching to Pterodactyl with finalEnvironment: [${Object.entries(finalEnvironment).map(([k, v]) => `${k}="${v}"`).join(', ')}]`);
+    // Safe diagnostics: never log actual values, passwords or secrets
+    const reqKeys = eggVariables.filter(v => v.isRequired).map(v => v.envVariable);
+    const sentSummary = Object.entries(finalEnvironment).map(([k, v]) => `${k}=${v ? '[SET]' : '[EMPTY]'}`).join(', ');
+    console.log(`[Pterodactyl Admin] createServer: Nest #${eggNestId}, Egg #${payload.eggId}, required: [${reqKeys.join(', ')}], total env keys sent: [${sentSummary}]`);
 
     // Call official Pterodactyl Application API /servers endpoint
     const body = {

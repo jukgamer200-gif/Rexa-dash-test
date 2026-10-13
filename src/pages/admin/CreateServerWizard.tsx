@@ -47,7 +47,9 @@ export const CreateServerWizard: React.FC = () => {
   // Dynamic Egg Variables State
   const [eggVariables, setEggVariables] = useState<EggVariable[]>([]);
   const [isLoadingVariables, setIsLoadingVariables] = useState(false);
+  const [variablesError, setVariablesError] = useState<string | null>(null);
   const [environmentValues, setEnvironmentValues] = useState<Record<string, string>>({});
+  const activeEggRequestId = React.useRef(0);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -111,6 +113,16 @@ export const CreateServerWizard: React.FC = () => {
         userId: defaultUser,
       }));
 
+      // Immediate pre-population if egg variables were provided by the nests include
+      if (firstEgg?.variables && firstEgg.variables.length > 0) {
+        setEggVariables(firstEgg.variables);
+        const initEnv: Record<string, string> = {};
+        for (const v of firstEgg.variables) {
+          initEnv[v.envVariable] = v.defaultValue ?? '';
+        }
+        setEnvironmentValues(initEnv);
+      }
+
       if (firstNode) {
         loadNodeAllocations(firstNode);
       }
@@ -130,33 +142,40 @@ export const CreateServerWizard: React.FC = () => {
     if (!nestId || !eggId) {
       setEggVariables([]);
       setEnvironmentValues({});
+      setVariablesError(null);
       return;
     }
+    const requestId = ++activeEggRequestId.current;
     setIsLoadingVariables(true);
+    setVariablesError(null);
+
     try {
       const res = await api.getEggVariables(nestId, eggId);
-      const vars = res.variables || [];
-      setEggVariables(vars);
+      if (requestId !== activeEggRequestId.current) return;
 
-      // Prepopulate environment values with default values from the egg
-      // and remove stale keys from previous eggs
-      setEnvironmentValues((prev) => {
-        const nextEnv: Record<string, string> = {};
-        for (const v of vars) {
-          if (prev[v.envVariable] !== undefined && prev[v.envVariable] !== '') {
-            nextEnv[v.envVariable] = prev[v.envVariable];
-          } else {
-            nextEnv[v.envVariable] = v.defaultValue ?? '';
+      const vars = res.variables || [];
+      if (vars.length > 0) {
+        setEggVariables(vars);
+
+        // Preserve already-entered values, populate defaults for new or empty ones
+        setEnvironmentValues((prev) => {
+          const nextEnv: Record<string, string> = { ...prev };
+          for (const v of vars) {
+            if (nextEnv[v.envVariable] === undefined || nextEnv[v.envVariable] === '') {
+              nextEnv[v.envVariable] = v.defaultValue ?? '';
+            }
           }
-        }
-        return nextEnv;
-      });
+          return nextEnv;
+        });
+      }
     } catch (err: any) {
+      if (requestId !== activeEggRequestId.current) return;
       console.error('Failed to load egg variables:', err);
-      setEggVariables([]);
-      setError(`Notice: Could not load egg variables: ${err.message}`);
+      setVariablesError(`Could not load Egg variables: ${err.message || 'Pterodactyl request failed'}`);
     } finally {
-      setIsLoadingVariables(false);
+      if (requestId === activeEggRequestId.current) {
+        setIsLoadingVariables(false);
+      }
     }
   };
 
@@ -196,11 +215,21 @@ export const CreateServerWizard: React.FC = () => {
       dockerImage: egg?.dockerImage || prev.dockerImage,
       startup: egg?.startup || prev.startup,
     }));
-    if (newNestId && newEggId) {
-      loadEggVariables(newNestId, newEggId);
+
+    if (egg?.variables && egg.variables.length > 0) {
+      setEggVariables(egg.variables);
+      const initEnv: Record<string, string> = {};
+      for (const v of egg.variables) {
+        initEnv[v.envVariable] = v.defaultValue ?? '';
+      }
+      setEnvironmentValues(initEnv);
     } else {
       setEggVariables([]);
       setEnvironmentValues({});
+    }
+
+    if (newNestId && newEggId) {
+      loadEggVariables(newNestId, newEggId);
     }
   };
 
@@ -216,11 +245,21 @@ export const CreateServerWizard: React.FC = () => {
       dockerImage: egg?.dockerImage || prev.dockerImage,
       startup: egg?.startup || prev.startup,
     }));
-    if (targetNestId && newEggId) {
-      loadEggVariables(targetNestId, newEggId);
+
+    if (egg?.variables && egg.variables.length > 0) {
+      setEggVariables(egg.variables);
+      const initEnv: Record<string, string> = {};
+      for (const v of egg.variables) {
+        initEnv[v.envVariable] = v.defaultValue ?? '';
+      }
+      setEnvironmentValues(initEnv);
     } else {
       setEggVariables([]);
       setEnvironmentValues({});
+    }
+
+    if (targetNestId && newEggId) {
+      loadEggVariables(targetNestId, newEggId);
     }
   };
 
@@ -232,6 +271,9 @@ export const CreateServerWizard: React.FC = () => {
       if (!formData.eggId) return 'Please select a software Egg template.';
     }
     if (step === 2) {
+      if (isLoadingVariables) {
+        return 'Egg environment variables are currently loading. Please wait a moment.';
+      }
       for (const v of eggVariables) {
         if (v.isRequired) {
           const val = environmentValues[v.envVariable];
@@ -301,6 +343,9 @@ export const CreateServerWizard: React.FC = () => {
       }
       if (formData.startup.includes('VANILLA_VERSION') && (!envToSend['VANILLA_VERSION'] || envToSend['VANILLA_VERSION'].trim() === '')) {
         envToSend['VANILLA_VERSION'] = 'latest';
+      }
+      if ((eggVariables.some((v) => v.envVariable === 'MINECRAFT_VERSION') || formData.startup.includes('MINECRAFT_VERSION')) && (!envToSend['MINECRAFT_VERSION'] || envToSend['MINECRAFT_VERSION'].trim() === '')) {
+        envToSend['MINECRAFT_VERSION'] = 'latest';
       }
 
       console.log('Dispatching server creation with environment payload:', envToSend);
