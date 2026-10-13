@@ -61,7 +61,7 @@ Run the interactive installer directly on your fresh Ubuntu VPS:
 
 ```bash
 # One-line remote installer:
-bash <(curl -fsSL https://raw.githubusercontent.com/jukgamer200-gif/rexa-dash-test/main/installer.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/jukgamer200-gif/Rexa-dash-test/main/installer.sh)
 
 # Or from cloned repository:
 sudo bash installer.sh
@@ -173,7 +173,7 @@ sudo apt-get install -y nodejs nginx certbot python3-certbot-nginx
 ### 2. Deploy RexaCloud
 ```bash
 sudo mkdir -p /var/www/rexacloud
-sudo git clone https://github.com/jukgamer200-gif/testdash.git /var/www/rexacloud
+sudo git clone https://github.com/jukgamer200-gif/Rexa-dash-test.git /var/www/rexacloud
 cd /var/www/rexacloud
 sudo npm install
 sudo npm run build

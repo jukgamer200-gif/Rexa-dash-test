@@ -1,0 +1,9 @@
+# ==============================================================================
+# RexaCloud Canonical Repository Configuration
+# Authoritative source repository settings used by installer.sh and upgrade.sh.
+# Prevents repository drift across installations, updates, and VPS environments.
+# ==============================================================================
+
+CANONICAL_REPO_URL="https://github.com/jukgamer200-gif/Rexa-dash-test.git"
+CANONICAL_DEFAULT_BRANCH="main"
+CANONICAL_ARCHIVE_URL="https://github.com/jukgamer200-gif/Rexa-dash-test/archive/refs/heads/main.tar.gz"

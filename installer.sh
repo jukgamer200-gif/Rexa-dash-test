@@ -8,9 +8,20 @@
 
 set -Eeuo pipefail
 
-# Project Repository Configuration
-REPO_URL="https://github.com/jukgamer200-gif/testdash.git"
-ARCHIVE_URL="https://github.com/jukgamer200-gif/testdash/archive/refs/heads/main.tar.gz"
+# Canonical Repository Configuration
+CANONICAL_REPO_URL="https://github.com/jukgamer200-gif/Rexa-dash-test.git"
+CANONICAL_DEFAULT_BRANCH="main"
+CANONICAL_ARCHIVE_URL="https://github.com/jukgamer200-gif/Rexa-dash-test/archive/refs/heads/${CANONICAL_DEFAULT_BRANCH}.tar.gz"
+
+# Optional local repository configuration override
+if [ -f "$(dirname "${BASH_SOURCE[0]}")/.repo-config" ]; then
+    # shellcheck source=/dev/null
+    . "$(dirname "${BASH_SOURCE[0]}")/.repo-config"
+fi
+
+REPO_URL="${REPO_URL:-$CANONICAL_REPO_URL}"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-$CANONICAL_DEFAULT_BRANCH}"
+ARCHIVE_URL="${ARCHIVE_URL:-$CANONICAL_ARCHIVE_URL}"
 
 # Terminal ANSI Color Codes
 CLR_RESET="\033[0m"
@@ -351,6 +362,15 @@ validate_repository_access() {
         if GIT_TERMINAL_PROMPT=0 git ls-remote --heads "$REPO_URL" &>/dev/null; then
             accessible=true
             log_success "GitHub repository is publicly accessible via Git."
+
+            # Verify actual remote default branch from HEAD symref
+            local remote_head_branch
+            remote_head_branch=$(GIT_TERMINAL_PROMPT=0 git ls-remote --symref "$REPO_URL" HEAD 2>/dev/null | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }' || echo "")
+            if [ -n "$remote_head_branch" ]; then
+                DEFAULT_BRANCH="$remote_head_branch"
+                ARCHIVE_URL="https://github.com/jukgamer200-gif/Rexa-dash-test/archive/refs/heads/${DEFAULT_BRANCH}.tar.gz"
+                log_info "Verified canonical default branch from remote: $DEFAULT_BRANCH"
+            fi
         fi
     fi
 
@@ -363,7 +383,7 @@ validate_repository_access() {
     fi
 
     if [ "$accessible" = false ]; then
-        log_error "Cannot reach the project repository: $REPO_URL"
+        log_error "Cannot reach the official project repository: $REPO_URL"
         log_error "The repository could not be contacted without credentials, or network connectivity is unavailable."
         log_error "Please verify internet connectivity and confirm the repository is public."
         exit 1
@@ -415,24 +435,24 @@ fetch_project_source() {
             cp -a "$INSTALL_DIR/database"/* "$data_backup_dir/database/" 2>/dev/null || true
         fi
 
-        git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
-        if GIT_TERMINAL_PROMPT=0 git -C "$INSTALL_DIR" fetch origin main 2>/dev/null; then
-            # Check if local and origin/main have diverged
+        git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || git -C "$INSTALL_DIR" remote add origin "$REPO_URL" 2>/dev/null || true
+        if GIT_TERMINAL_PROMPT=0 git -C "$INSTALL_DIR" fetch origin "$DEFAULT_BRANCH" 2>/dev/null; then
+            # Check if local and origin/$DEFAULT_BRANCH have diverged
             local local_commit remote_commit merge_base
             local_commit=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo "")
-            remote_commit=$(git -C "$INSTALL_DIR" rev-parse origin/main 2>/dev/null || echo "")
-            merge_base=$(git -C "$INSTALL_DIR" merge-base HEAD origin/main 2>/dev/null || echo "")
+            remote_commit=$(git -C "$INSTALL_DIR" rev-parse "origin/$DEFAULT_BRANCH" 2>/dev/null || echo "")
+            merge_base=$(git -C "$INSTALL_DIR" merge-base HEAD "origin/$DEFAULT_BRANCH" 2>/dev/null || echo "")
 
             if [ -n "$local_commit" ] && [ -n "$remote_commit" ] && [ "$local_commit" != "$remote_commit" ]; then
                 if [ "$local_commit" != "$merge_base" ] && [ "$remote_commit" != "$merge_base" ]; then
-                    log_warn "Local branch and remote origin/main have diverged. Creating backup branch..."
+                    log_warn "Local branch and remote origin/$DEFAULT_BRANCH have diverged. Creating backup branch..."
                     git -C "$INSTALL_DIR" branch -f "backup-local-$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-                    log_info "Preserved local commit on a backup branch. Aligning main to origin/main..."
+                    log_info "Preserved local commit on a backup branch. Aligning $DEFAULT_BRANCH to origin/$DEFAULT_BRANCH..."
                 fi
             fi
 
-            # Checkout and reset main cleanly to origin/main
-            if GIT_TERMINAL_PROMPT=0 git -C "$INSTALL_DIR" checkout -B main origin/main 2>/dev/null || GIT_TERMINAL_PROMPT=0 git -C "$INSTALL_DIR" reset --hard origin/main 2>/dev/null; then
+            # Checkout and reset cleanly to origin/$DEFAULT_BRANCH
+            if GIT_TERMINAL_PROMPT=0 git -C "$INSTALL_DIR" checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" 2>/dev/null || GIT_TERMINAL_PROMPT=0 git -C "$INSTALL_DIR" reset --hard "origin/$DEFAULT_BRANCH" 2>/dev/null; then
                 download_success=true
                 log_success "Repository updated successfully via Git."
             fi
@@ -457,7 +477,7 @@ fetch_project_source() {
             log_info "Installation directory $INSTALL_DIR is not empty. Using safe staging directory..."
             local staging_dir
             staging_dir=$(mktemp -d /tmp/rexacloud_stage_XXXXXX)
-            if GIT_TERMINAL_PROMPT=0 git clone --depth 1 "$REPO_URL" "$staging_dir"; then
+            if GIT_TERMINAL_PROMPT=0 git clone --branch "$DEFAULT_BRANCH" --depth 1 "$REPO_URL" "$staging_dir"; then
                 download_success=true
                 log_success "Repository cloned into staging directory."
                 if [ -f "$INSTALL_DIR/.env" ]; then
@@ -474,7 +494,7 @@ fetch_project_source() {
             fi
         else
             log_info "Cloning $REPO_URL into $INSTALL_DIR..."
-            if GIT_TERMINAL_PROMPT=0 git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"; then
+            if GIT_TERMINAL_PROMPT=0 git clone --branch "$DEFAULT_BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"; then
                 download_success=true
                 log_success "Repository cloned successfully."
             else
@@ -508,6 +528,16 @@ fetch_project_source() {
         log_error "No npm commands will be executed on a non-existent or partially downloaded project."
         exit 1
     fi
+
+    # Write authoritative repository configuration to prevent future drift
+    cat <<EOF > "$INSTALL_DIR/.repo-config"
+# ==============================================================================
+# RexaCloud Canonical Repository Configuration
+# ==============================================================================
+CANONICAL_REPO_URL="$REPO_URL"
+CANONICAL_DEFAULT_BRANCH="$DEFAULT_BRANCH"
+CANONICAL_ARCHIVE_URL="$ARCHIVE_URL"
+EOF
 }
 
 # 6. Validate the Project Before Running NPM
