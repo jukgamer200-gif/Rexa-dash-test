@@ -11,6 +11,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { api } from '../../services/api.js';
 import { AdminNode, AdminNest, User, EggVariable } from '@/shared/types';
+import { validateAndBuildEnvironment } from '@/shared/variableValidation.js';
 import {
   ChevronRight,
   Check,
@@ -154,24 +155,28 @@ export const CreateServerWizard: React.FC = () => {
       if (requestId !== activeEggRequestId.current) return;
 
       const vars = res.variables || [];
-      if (vars.length > 0) {
-        setEggVariables(vars);
+      setEggVariables(vars);
 
-        // Preserve already-entered values, populate defaults for new or empty ones
-        setEnvironmentValues((prev) => {
-          const nextEnv: Record<string, string> = { ...prev };
-          for (const v of vars) {
-            if (nextEnv[v.envVariable] === undefined || nextEnv[v.envVariable] === '') {
-              nextEnv[v.envVariable] = v.defaultValue ?? '';
-            }
+      // Cleanly build environment values strictly for the selected egg's variables
+      // Discards stale variables from previously selected eggs
+      setEnvironmentValues((prev) => {
+        const nextEnv: Record<string, string> = {};
+        for (const v of vars) {
+          const userVal = prev[v.envVariable];
+          if (userVal !== undefined && userVal !== null && userVal.trim() !== '') {
+            nextEnv[v.envVariable] = userVal;
+          } else {
+            nextEnv[v.envVariable] = v.defaultValue ?? '';
           }
-          return nextEnv;
-        });
-      }
+        }
+        return nextEnv;
+      });
     } catch (err: any) {
       if (requestId !== activeEggRequestId.current) return;
       console.error('Failed to load egg variables:', err);
       setVariablesError(`Could not load Egg variables: ${err.message || 'Pterodactyl request failed'}`);
+      setEggVariables([]);
+      setEnvironmentValues({});
     } finally {
       if (requestId === activeEggRequestId.current) {
         setIsLoadingVariables(false);
@@ -274,13 +279,13 @@ export const CreateServerWizard: React.FC = () => {
       if (isLoadingVariables) {
         return 'Egg environment variables are currently loading. Please wait a moment.';
       }
-      for (const v of eggVariables) {
-        if (v.isRequired) {
-          const val = environmentValues[v.envVariable];
-          if (val === undefined || val === null || val.trim() === '') {
-            return `The "${v.name}" (${v.envVariable}) environment variable is required.`;
-          }
-        }
+      if (variablesError) {
+        return `Cannot proceed: ${variablesError}. Please retry or select another software Egg.`;
+      }
+      // Authoritatively validate environment values against the selected Egg's definitions and rules
+      const validation = validateAndBuildEnvironment(eggVariables, environmentValues);
+      if (!validation.valid) {
+        return validation.errors[0] || 'Please provide all required environment variables.';
       }
     }
     if (step === 3) {
@@ -323,32 +328,18 @@ export const CreateServerWizard: React.FC = () => {
     setIsSubmitting(true);
     setError(null);
     try {
-      // Ensure all egg variables have either the entered value or the egg default
-      const envToSend: Record<string, string> = { ...environmentValues };
-      for (const v of eggVariables) {
-        if ((envToSend[v.envVariable] === undefined || envToSend[v.envVariable] === '') && v.defaultValue) {
-          envToSend[v.envVariable] = v.defaultValue;
-        }
+      // Validate and build authoritative environment payload (no blind injection, no stale keys)
+      const validation = validateAndBuildEnvironment(eggVariables, environmentValues);
+      if (!validation.valid) {
+        setError(validation.errors[0] || 'Egg variable validation failed.');
+        setIsSubmitting(false);
+        return;
       }
 
-      // Safe fallbacks for common startup variables if referenced by startup script
-      if (formData.startup.includes('SERVER_JARFILE') && (!envToSend['SERVER_JARFILE'] || envToSend['SERVER_JARFILE'].trim() === '')) {
-        envToSend['SERVER_JARFILE'] = 'server.jar';
-      }
-      if ((formData.startup.includes('BUILD_NUMBER') || formData.name.toLowerCase().includes('paper')) && (!envToSend['BUILD_NUMBER'] || envToSend['BUILD_NUMBER'].trim() === '')) {
-        envToSend['BUILD_NUMBER'] = 'latest';
-      }
-      if (formData.startup.includes('SERVER_VERSION') && (!envToSend['SERVER_VERSION'] || envToSend['SERVER_VERSION'].trim() === '')) {
-        envToSend['SERVER_VERSION'] = 'latest';
-      }
-      if (formData.startup.includes('VANILLA_VERSION') && (!envToSend['VANILLA_VERSION'] || envToSend['VANILLA_VERSION'].trim() === '')) {
-        envToSend['VANILLA_VERSION'] = 'latest';
-      }
-      if ((eggVariables.some((v) => v.envVariable === 'MINECRAFT_VERSION') || formData.startup.includes('MINECRAFT_VERSION')) && (!envToSend['MINECRAFT_VERSION'] || envToSend['MINECRAFT_VERSION'].trim() === '')) {
-        envToSend['MINECRAFT_VERSION'] = 'latest';
-      }
+      const envToSend = validation.environment;
 
-      console.log('Dispatching server creation with environment payload:', envToSend);
+      // Safe diagnostics: never log actual values, passwords or credentials
+      console.log('Dispatching server creation with environment keys:', Object.keys(envToSend));
 
       const res = await api.createServer({
         name: formData.name.trim(),
@@ -654,6 +645,23 @@ export const CreateServerWizard: React.FC = () => {
                     <div className="flex items-center justify-center p-6 bg-[#140E24] rounded-xl border border-purple-900/20 text-slate-400 text-xs">
                       <Loader2 className="w-4 h-4 text-purple-500 animate-spin mr-2" />
                       Loading variables for selected Egg from Pterodactyl...
+                    </div>
+                  ) : variablesError ? (
+                    <div className="p-4 bg-rose-950/20 rounded-xl border border-rose-500/30 flex items-center justify-between gap-3 text-xs">
+                      <div className="flex items-start gap-2.5 text-rose-300">
+                        <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-semibold text-rose-200">Failed to load Egg variables from Pterodactyl</p>
+                          <p className="text-[11px] text-rose-400 mt-0.5">{variablesError}</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => loadEggVariables(formData.nestId, formData.eggId)}
+                        className="px-3 py-1.5 bg-rose-600/30 hover:bg-rose-600/50 text-rose-200 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors"
+                      >
+                        Retry
+                      </button>
                     </div>
                   ) : eggVariables.length === 0 ? (
                     <div className="p-4 bg-[#140E24] rounded-xl border border-purple-900/20 text-slate-400 text-xs">

@@ -349,6 +349,7 @@ export const pterodactylAdmin = {
     }
 
     let parsed: EggVariable[] = [];
+    let fetchError: Error | null = null;
     try {
       const eggData = await this.getEgg(targetNestId, eggId);
       const rawVars = extractVariablesFromEggData(eggData);
@@ -356,6 +357,7 @@ export const pterodactylAdmin = {
         .map((item: any) => parseEggVariable(item))
         .filter((v: EggVariable | null): v is EggVariable => v !== null);
     } catch (err: any) {
+      fetchError = err;
       console.warn(`[Pterodactyl Admin] getEgg warning in getEggVariables: ${err.message}`);
     }
 
@@ -370,8 +372,13 @@ export const pterodactylAdmin = {
       }
     }
 
+    // If an API failure occurred and variables could not be resolved, do not silently return []
+    if (parsed.length === 0 && fetchError) {
+      throw new Error(`Failed to load egg variable definitions from Pterodactyl: ${fetchError.message}`);
+    }
+
     const requiredKeys = parsed.filter(v => v.isRequired).map(v => v.envVariable);
-    console.log(`[Pterodactyl Admin] getEggVariables: Egg #${eggId} has ${parsed.length} variables (${requiredKeys.length} required: [${requiredKeys.join(', ')}])`);
+    console.log(`[Pterodactyl Admin] getEggVariables: Egg #${eggId} resolved ${parsed.length} variables (${requiredKeys.length} required: [${requiredKeys.join(', ')}])`);
     return parsed;
   },
 
@@ -416,6 +423,7 @@ export const pterodactylAdmin = {
     // 3. Fetch egg variable definitions and attributes from Pterodactyl Application API
     let eggVariables: EggVariable[] = [];
     let eggAttributes: any = null;
+    let eggFetchError: Error | null = null;
     try {
       const eggData = await this.getEgg(eggNestId, Number(payload.eggId));
       if (eggData) {
@@ -426,6 +434,7 @@ export const pterodactylAdmin = {
           .filter((v: EggVariable | null): v is EggVariable => v !== null);
       }
     } catch (err: any) {
+      eggFetchError = err;
       console.warn(`[Pterodactyl Admin] getEgg warning in createServer for nest #${eggNestId}, egg #${payload.eggId}: ${err.message}`);
     }
 
@@ -441,37 +450,26 @@ export const pterodactylAdmin = {
       }
     }
 
-    // 4. Validate and build environment strictly against the Egg's definitions
+    // If egg variables failed to load due to an API error, halt provisioning rather than proceeding blind
+    if (eggVariables.length === 0 && eggFetchError) {
+      throw new Error(`Unable to load Egg #${payload.eggId} configuration from Pterodactyl: ${eggFetchError.message}. Provisioning halted.`);
+    }
+
+    // 4. Validate and build environment strictly against the Egg's definitions and rules
     const userEnv = (payload.environment && typeof payload.environment === 'object') ? payload.environment : {};
     const validation = validateAndBuildEnvironment(eggVariables, userEnv);
 
     if (!validation.valid) {
       const missingList = validation.missingRequired.map(m => `"${m.name}" (${m.key})`).join('; ');
-      console.warn(`[Pterodactyl Admin] createServer validation rejected: missing required variables [${missingList}]`);
-      throw new Error(`The following required environment variables are missing: ${missingList}`);
+      const ruleErrorsList = validation.errors.join('; ');
+      console.warn(`[Pterodactyl Admin] createServer validation rejected: ${ruleErrorsList || missingList}`);
+      throw new Error(`Egg variable validation failed: ${ruleErrorsList || missingList}`);
     }
 
-    const finalEnvironment = { ...validation.environment };
+    const finalEnvironment = validation.environment;
 
     const dockerImage = payload.dockerImage || eggAttributes?.docker_image || 'ghcr.io/pterodactyl/yolks:java_21';
     const startup = payload.startup || eggAttributes?.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}';
-
-    // Extra safety net: Check startup script and egg identity to guarantee canonical Minecraft variables are NEVER omitted
-    if (startup.includes('SERVER_JARFILE') && (!finalEnvironment['SERVER_JARFILE'] || finalEnvironment['SERVER_JARFILE'].trim() === '')) {
-      finalEnvironment['SERVER_JARFILE'] = 'server.jar';
-    }
-    if ((startup.includes('BUILD_NUMBER') || payload.name.toLowerCase().includes('paper')) && (!finalEnvironment['BUILD_NUMBER'] || finalEnvironment['BUILD_NUMBER'].trim() === '')) {
-      finalEnvironment['BUILD_NUMBER'] = 'latest';
-    }
-    if (startup.includes('SERVER_VERSION') && (!finalEnvironment['SERVER_VERSION'] || finalEnvironment['SERVER_VERSION'].trim() === '')) {
-      finalEnvironment['SERVER_VERSION'] = 'latest';
-    }
-    if (startup.includes('VANILLA_VERSION') && (!finalEnvironment['VANILLA_VERSION'] || finalEnvironment['VANILLA_VERSION'].trim() === '')) {
-      finalEnvironment['VANILLA_VERSION'] = 'latest';
-    }
-    if (startup.includes('MINECRAFT_VERSION') && (!finalEnvironment['MINECRAFT_VERSION'] || finalEnvironment['MINECRAFT_VERSION'].trim() === '')) {
-      finalEnvironment['MINECRAFT_VERSION'] = 'latest';
-    }
 
     // Safe diagnostics: never log actual values, passwords or secrets
     const reqKeys = eggVariables.filter(v => v.isRequired).map(v => v.envVariable);
